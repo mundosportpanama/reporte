@@ -731,6 +731,7 @@ function renderDashboard(rows) {
   const maxRow = sales.reduce((mx, r) => (parseFloat(r.total)||0) > (parseFloat(mx.total)||0) ? r : mx, {total:0, descripcion:'—'});
 
   document.getElementById('metTotal').textContent = fmt(total);
+  document.querySelector('#metTotalStr span:last-child').textContent = fmt(total);
   document.getElementById('metTotalSub').textContent = count + ' transaccion' + (count !== 1 ? 'es' : '');
   document.getElementById('metAvg').textContent   = fmt(avg);
   document.getElementById('metMax').textContent   = fmt(parseFloat(maxRow.total) || 0);
@@ -855,46 +856,389 @@ function renderDashboard(rows) {
   document.getElementById('dashboard').style.display   = 'block';
 }
 
-// ── EXPORT IMAGE ─────────────────────────────────────────
-function downloadImage() {
-  const btn = document.getElementById('btnImg');
-  btn.disabled = true;
-  btn.textContent = 'Generando...';
-  const dash = document.getElementById('dashboard');
-  html2canvas(dash, { backgroundColor: '#1C1C1C', scale: 2, useCORS: true, logging: false })
-    .then(canvas => {
-      const a = document.createElement('a');
-      a.download = 'reporte-ventas-' + todayISO() + '.png';
-      a.href = canvas.toDataURL('image/png');
-      a.click();
-    })
-    .finally(() => {
-      btn.disabled = false;
-      btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Descargar Imagen`;
-    });
+// ══════════════════════════════════════════════════════════
+//  LEER DATOS DEL DASHBOARD (ya calculados y en pantalla)
+// ══════════════════════════════════════════════════════════
+function _leerDatos() {
+  // Leer DIRECTAMENTE del elemento principal del total (más confiable)
+  const totalEl = document.getElementById('metTotal');
+  const totalTxt = totalEl ? totalEl.textContent.trim().replace(/[^\d.,]/g, '') : '0.00';
+  
+  // Sumar métodos como respaldo, pero priorizar el principal
+  const efVal = document.getElementById('payEfectivo')?.textContent.trim().replace(/[^\d.,]/g, '') || '0.00';
+  const yaVal = document.getElementById('payYappy')?.textContent.trim().replace(/[^\d.,]/g, '') || '0.00';
+  const taVal = document.getElementById('payTarjeta')?.textContent.trim().replace(/[^\d.,]/g, '') || '0.00';
+  
+  const toNum = (s) => parseFloat(s.replace(/,/g, '')) || 0;
+  const sumaTotal = toNum(efVal) + toNum(yaVal) + toNum(taVal);
+  
+  // Usar el del dashboard si coincide aproximadamente, sino la suma
+  const totalNum = toNum(totalTxt);
+  const finalTotalTxt = Math.abs(totalNum - sumaTotal) < 0.01 ? totalTxt : sumaTotal.toLocaleString('es-PA', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  
+  const totalSub = document.getElementById('metTotalSub')?.textContent.trim() || '0 transacciones';
+  const fecha = document.getElementById('headerDate')?.textContent.trim() || todayStr();
+  
+  // Conteos por método de pago
+  const efCnt = document.getElementById('payEfectivoCount')?.textContent.trim() || '0 ventas';
+  const yaCnt = document.getElementById('payYappyCount')?.textContent.trim() || '0 ventas';
+  const taCnt = document.getElementById('payTarjetaCount')?.textContent.trim() || '0 ventas';
+  
+  // Leer filas de la tabla
+  const filas = [];
+  const rows = document.querySelectorAll('#salesTableBody tr');
+  rows.forEach((tr) => {
+    const tds = tr.querySelectorAll('td');
+    if (tds.length >= 5 && !tr.querySelector('.empty-table')) {
+      filas.push({
+        num: tds[0].textContent.trim(),
+        hora: tds[1].textContent.trim(),
+        desc: tds[2].textContent.trim(),
+        metodo: tds[3].textContent.trim(),
+        total: tds[4].textContent.trim()
+      });
+    }
+  });
+  
+  return { totalTxt: '$' + finalTotalTxt, totalMain: finalTotalTxt, totalSub, fecha, efVal: '$' + efVal, efCnt, yaVal: '$' + yaVal, yaCnt, taVal: '$' + taVal, taCnt, filas };
 }
 
-// ── EXPORT PDF ───────────────────────────────────────────
-function downloadPDF() {
+
+// ══════════════════════════════════════════════════════════
+//  CSS COMPARTIDO para los bloques del reporte
+// ══════════════════════════════════════════════════════════
+const _CSS = `
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:Arial,Helvetica,sans-serif;background:#fff;color:#000;}
+  .page{width:816px;background:#fff;padding:40px 48px;}
+  /* encabezado */
+  .hdr{display:flex;justify-content:space-between;align-items:flex-end;
+       border-bottom:5px solid #C62828;padding-bottom:16px;margin-bottom:28px;}
+  .hdr-marca{font-size:30px;font-weight:900;line-height:1;}
+  .hdr-marca span{color:#C62828;}
+  .hdr-sub{font-size:12px;font-weight:700;color:#666;letter-spacing:2px;
+           text-transform:uppercase;margin-top:3px;}
+  .hdr-fecha-lbl{font-size:11px;font-weight:700;text-transform:uppercase;
+                 color:#999;letter-spacing:1px;text-align:right;}
+  .hdr-fecha-val{font-size:15px;font-weight:900;color:#000;text-align:right;margin-top:2px;}
+  /* sección */
+  .sec-titulo{font-size:12px;font-weight:900;text-transform:uppercase;
+              letter-spacing:1.5px;color:#C62828;border-bottom:2px solid #FFCDD2;
+              padding-bottom:6px;margin-bottom:12px;}
+  /* total */
+  .total-box{background:#FFF5F5;border:2px solid #FFCDD2;border-radius:12px;
+             padding:22px 28px;display:inline-block;min-width:240px;margin-bottom:26px;}
+  .total-lbl{font-size:13px;font-weight:800;color:#777;text-transform:uppercase;
+             letter-spacing:1px;margin-bottom:5px;}
+  .total-val{font-size:60px;font-weight:900;color:#C62828;line-height:1;}
+  .total-cnt{font-size:15px;color:#555;font-weight:700;margin-top:6px;}
+  /* métodos */
+  .pay-row{display:flex;gap:12px;margin-bottom:26px;}
+  .pay-box{flex:1;border-radius:10px;padding:16px 18px;}
+  .pay-ef {border:2px solid #C3E6CB;background:#F6FFF8;}
+  .pay-ya {border:2px solid #BCD4F5;background:#F0F6FF;}
+  .pay-ta {border:2px solid #F5DFA0;background:#FFFDF0;}
+  .pay-ico{font-size:24px;margin-bottom:5px;}
+  .pay-met{font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:1px;}
+  .pay-ef .pay-met{color:#135C2E;}
+  .pay-ya .pay-met{color:#1553B5;}
+  .pay-ta .pay-met{color:#7A4A00;}
+  .pay-amt{font-size:36px;font-weight:900;color:#000;line-height:1.1;margin-top:3px;}
+  .pay-cnt{font-size:13px;color:#555;font-weight:700;margin-top:4px;}
+  /* tabla */
+  .tbl{width:100%;border-collapse:collapse;}
+  .tbl thead tr{background:#C62828;}
+  .tbl th{padding:12px 13px;font-size:12px;font-weight:900;text-align:left;
+          text-transform:uppercase;color:#fff;letter-spacing:.5px;}
+  .tbl td{padding:12px 13px;font-size:15px;color:#000;font-weight:600;
+          border-bottom:1px solid #e0e0e0;vertical-align:top;}
+  .tbl tr.par td{background:#F5F5F5;}
+  .tbl tr.impar td{background:#FFFFFF;}
+  .td-num{color:#999!important;font-size:13px!important;}
+  .td-hora{color:#666!important;font-size:13px!important;}
+  .td-desc{font-weight:700!important;font-size:16px!important;}
+  .td-ef{color:#135C2E!important;font-weight:900!important;}
+  .td-ya{color:#1553B5!important;font-weight:900!important;}
+  .td-ta{color:#7A4A00!important;font-weight:900!important;}
+  .td-monto{font-size:18px!important;font-weight:900!important;}
+  /* pie */
+  .pie{margin-top:22px;border-top:2px solid #eee;padding-top:10px;text-align:center;
+       font-size:11px;color:#bbb;font-weight:700;letter-spacing:.5px;}
+  /* encabezado continuación */
+  .cont-hdr{border-bottom:3px solid #C62828;padding-bottom:10px;margin-bottom:16px;
+            display:flex;justify-content:space-between;align-items:center;}
+  .cont-marca{font-size:18px;font-weight:900;}
+  .cont-marca span{color:#C62828;}
+  .cont-pag{font-size:12px;color:#888;font-weight:700;}
+`;
+
+// ══════════════════════════════════════════════════════════
+//  CONSTRUIR HTML DE CADA "PÁGINA" DEL REPORTE
+//  Devuelve array de strings HTML, uno por página/imagen
+// ══════════════════════════════════════════════════════════
+function _construirPaginas(d, FILAS_POR_PAG) {
+  const ahora = new Date().toLocaleString('es-PA');
+  const totalPags = Math.max(1, Math.ceil(d.filas.length / FILAS_POR_PAG) || 1);
+  const paginas = [];
+
+  for (let p = 0; p < totalPags; p++) {
+    const esPrimera = p === 0;
+    const esUltima  = p === totalPags - 1;
+    const inicio    = p * FILAS_POR_PAG;
+    const fin       = Math.min(inicio + FILAS_POR_PAG, d.filas.length);
+    const filasPag  = d.filas.slice(inicio, fin);
+
+    // Filas de tabla HTML
+    let filasHTML = '';
+    if (d.filas.length === 0) {
+      filasHTML = `<tr class="par"><td colspan="5" style="text-align:center;padding:24px;color:#aaa;font-size:16px;">Sin ventas registradas hoy</td></tr>`;
+    } else {
+      filasPag.forEach((f, i) => {
+        const cls = (inicio + i) % 2 === 0 ? 'par' : 'impar';
+        const m   = f.metodo.toUpperCase();
+        const mc  = m.includes('YAPPY') ? 'td-ya' : m.includes('TARJETA') ? 'td-ta' : 'td-ef';
+        filasHTML += `
+          <tr class="${cls}">
+            <td class="td-num">${f.num}</td>
+            <td class="td-hora">${f.hora}</td>
+            <td class="td-desc">${f.desc}</td>
+            <td class="${mc}">${f.metodo}</td>
+            <td class="td-monto">${f.total}</td>
+          </tr>`;
+      });
+    }
+
+    // Encabezado: primera página completo, resto compacto
+    const hdrHTML = esPrimera ? `
+      <div class="hdr">
+        <div>
+          <div class="hdr-marca">MUNDO <span>SPORT</span></div>
+          <div class="hdr-sub">Coronado &nbsp;·&nbsp; Reporte de Ventas</div>
+        </div>
+        <div>
+          <div class="hdr-fecha-lbl">Fecha</div>
+          <div class="hdr-fecha-val">${d.fecha}</div>
+        </div>
+      </div>` : `
+      <div class="cont-hdr">
+        <div class="cont-marca">MUNDO <span>SPORT</span> <span style="font-size:13px;color:#888;font-weight:700;">— Coronado</span></div>
+        <div class="cont-pag">Página ${p + 1} de ${totalPags} &nbsp;·&nbsp; ${d.fecha}</div>
+      </div>`;
+
+    // Bloque de resumen: solo en primera página
+    const resumenHTML = esPrimera ? `
+      <div class="sec-titulo">Total Vendido</div>
+      <div class="total-box">
+        <div class="total-lbl">Total del día</div>
+        <div class="total-val">${d.totalTxt}</div>
+        <div class="total-cnt">${d.totalSub}</div>
+      </div>
+
+      <div class="sec-titulo">Ventas por Método de Pago</div>
+      <div class="pay-row">
+        <div class="pay-box pay-ef">
+          <div class="pay-ico">💵</div>
+          <div class="pay-met">Efectivo</div>
+          <div class="pay-amt">${d.efVal}</div>
+          <div class="pay-cnt">${d.efCnt}</div>
+        </div>
+        <div class="pay-box pay-ya">
+          <div class="pay-ico">📱</div>
+          <div class="pay-met">Yappy</div>
+          <div class="pay-amt">${d.yaVal}</div>
+          <div class="pay-cnt">${d.yaCnt}</div>
+        </div>
+        <div class="pay-box pay-ta">
+          <div class="pay-ico">💳</div>
+          <div class="pay-met">Tarjeta</div>
+          <div class="pay-amt">${d.taVal}</div>
+          <div class="pay-cnt">${d.taCnt}</div>
+        </div>
+      </div>` : '';
+
+    // Título sección tabla
+    const tituloTabla = esPrimera
+      ? `<div class="sec-titulo">Detalle de Ventas</div>`
+      : `<div class="sec-titulo">Detalle de Ventas (continuación)</div>`;
+
+    // Pie
+    const pieHTML = esUltima
+      ? `<div class="pie">MUNDO SPORT CORONADO &nbsp;·&nbsp; Generado: ${ahora}</div>`
+      : `<div class="pie">MUNDO SPORT CORONADO &nbsp;·&nbsp; Continúa en la siguiente página...</div>`;
+
+    paginas.push(`
+      <!DOCTYPE html><html><head><meta charset="UTF-8">
+      <style>${_CSS}</style></head>
+      <body><div class="page">
+        ${hdrHTML}
+        ${resumenHTML}
+        ${tituloTabla}
+        <table class="tbl">
+          <thead><tr>
+            <th>#</th><th>Hora</th><th>Descripción</th><th>Método</th><th>Total</th>
+          </tr></thead>
+          <tbody>${filasHTML}</tbody>
+        </table>
+        ${pieHTML}
+      </div></body></html>`);
+  }
+
+  return paginas;
+}
+
+// ══════════════════════════════════════════════════════════
+//  RENDERIZAR HTML → CANVAS (usando iframe oculto)
+// ══════════════════════════════════════════════════════════
+function _renderizarPagina(htmlStr, ancho, alto) {
+  return new Promise(resolve => {
+    const iframe = document.createElement('iframe');
+    iframe.style.cssText = `position:fixed;top:-9999px;left:0;width:${ancho}px;height:${alto}px;border:none;visibility:hidden;`;
+    document.body.appendChild(iframe);
+
+    const doc = iframe.contentDocument || iframe.contentWindow.document;
+    doc.open();
+    doc.write(htmlStr);
+    doc.close();
+
+    // Esperar render completo
+setTimeout(() => {
+      html2canvas(doc.body, {
+        backgroundColor: '#ffffff',
+        scale: 2,
+        useCORS: true,
+        logging: false,
+        width: ancho,
+        windowWidth: ancho
+      }).then(canvas => {
+        document.body.removeChild(iframe);
+        resolve(canvas);
+      }).catch(err => {
+        console.error('html2canvas error:', err);
+        document.body.removeChild(iframe);
+        resolve(null);
+      });
+    }, 800);
+  });
+}
+
+// ══════════════════════════════════════════════════════════
+//  BOTÓN: DESCARGAR IMAGEN(S) — 1080×1350 px por imagen
+// ══════════════════════════════════════════════════════════
+async function downloadImage() {
+  //await new Promise(r => setTimeout(r, 500));
+  //const d = leerDatos();
+  const btn = document.getElementById('btnImg');
+  btn.disabled = true;
+
+  try {
+    const d       = _leerDatos();
+    // 1080×1350 = relación 0.8 → ancho HTML ~816 → alto ~1020
+    const ANCHO_HTML = 816;
+    const ALTO_HTML  = 1020;
+    // Con 2× scale → canvas 1632×2040 → recortamos/escalamos a 1080×1350
+    const FILAS_PAG  = 8; // filas por imagen (ajustar según necesidad)
+    const paginas = _construirPaginas(d, FILAS_PAG);
+    const total   = paginas.length;
+
+    for (let i = 0; i < total; i++) {
+      btn.textContent = `Generando imagen ${i + 1} de ${total}...`;
+      const canvas = await _renderizarPagina(paginas[i], ANCHO_HTML, ALTO_HTML);
+      if (!canvas) continue;
+
+      // Escalar a 1080×1350
+      const out    = document.createElement('canvas');
+      out.width    = 1080;
+      out.height   = 1350;
+      const ctx    = out.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, 1080, 1350);
+      // Calcular fit dentro de 1080×1350 manteniendo aspecto
+      const scaleX = 1080 / canvas.width;
+      const scaleY = 1350 / canvas.height;
+      const scale  = Math.min(scaleX, scaleY);
+      const dw     = Math.round(canvas.width  * scale);
+      const dh     = Math.round(canvas.height * scale);
+      const dx     = Math.round((1080 - dw) / 2);
+      const dy     = Math.round((1350 - dh) / 2);
+      ctx.drawImage(canvas, dx, dy, dw, dh);
+
+      const sufijo = total > 1 ? `-p${i + 1}` : '';
+      const a      = document.createElement('a');
+      a.download   = `reporte-ventas-${todayISO()}${sufijo}.jpg`;
+      a.href       = out.toDataURL('image/jpeg', 0.94);
+      a.click();
+
+      // Pausa entre descargas para no saturar el navegador
+      if (i < total - 1) await new Promise(r => setTimeout(r, 600));
+    }
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Descargar Imagen`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+//  BOTÓN: DESCARGAR PDF — 8.5×11 pulgadas, multi-página
+// ══════════════════════════════════════════════════════════
+async function downloadPDF() {
+  //await new Promise(r => setTimeout(r, 500));
+  //const d = leerDatos();
   const btn = document.getElementById('btnPdf');
   btn.disabled = true;
-  btn.textContent = 'Generando PDF...';
-  const dash = document.getElementById('dashboard');
-  html2canvas(dash, { backgroundColor: '#1C1C1C', scale: 2, useCORS: true, logging: false })
-    .then(canvas => {
-      const { jsPDF } = window.jspdf;
-      const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
-      const pageW = pdf.internal.pageSize.getWidth();
-      const imgData = canvas.toDataURL('image/png');
-      const ratio = canvas.height / canvas.width;
-      const imgH  = pageW * ratio;
-      pdf.addImage(imgData, 'PNG', 0, 0, pageW, imgH);
-      pdf.save('reporte-ventas-' + todayISO() + '.pdf');
-    })
-    .finally(() => {
-      btn.disabled = false;
-      btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg> Descargar PDF`;
-    });
+
+  try {
+    const d = _leerDatos();
+    // 8.5×11 in = 816×1056 px a 96dpi
+    const ANCHO_HTML = 816;
+    const ALTO_HTML  = 1056;
+    const FILAS_PAG  = 9; // filas por página PDF
+    const paginas    = _construirPaginas(d, FILAS_PAG);
+    const total      = paginas.length;
+
+    const { jsPDF } = window.jspdf;
+    // letter = 215.9×279.4 mm = 8.5×11 in
+    const pdf  = new jsPDF({ orientation: 'p', unit: 'mm', format: 'letter' });
+    const pw   = pdf.internal.pageSize.getWidth();   // 215.9 mm
+    const ph   = pdf.internal.pageSize.getHeight();  // 279.4 mm
+
+    for (let i = 0; i < total; i++) {
+      btn.textContent = `Generando PDF ${i + 1}/${total}...`;
+      const canvas = await _renderizarPagina(paginas[i], ANCHO_HTML, ALTO_HTML);
+      if (!canvas) continue;
+
+      const img  = canvas.toDataURL('image/jpeg', 0.95);
+      const imgH = (canvas.height / canvas.width) * pw; // altura proporcional en mm
+
+      if (i > 0) pdf.addPage('letter', 'p');
+
+      if (imgH <= ph) {
+        // Cabe en una página
+        pdf.addImage(img, 'JPEG', 0, 0, pw, imgH);
+      } else {
+        // Recortar en trozos de ph
+        const canvasPh = (ph / pw) * canvas.width; // píxeles de canvas por "hoja"
+        let yPx = 0;
+        let primerTrozo = true;
+        while (yPx < canvas.height) {
+          const trozo   = document.createElement('canvas');
+          trozo.width   = canvas.width;
+          trozo.height  = Math.min(canvasPh, canvas.height - yPx);
+          trozo.getContext('2d').drawImage(canvas, 0, -yPx);
+          const tImg = trozo.toDataURL('image/jpeg', 0.95);
+          const tH   = (trozo.height / canvas.width) * pw;
+          if (!primerTrozo) pdf.addPage('letter', 'p');
+          pdf.addImage(tImg, 'JPEG', 0, 0, pw, tH);
+          yPx += canvasPh;
+          primerTrozo = false;
+        }
+      }
+    }
+
+    pdf.save(`reporte-ventas-${todayISO()}.pdf`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg> Descargar PDF`;
+  }
 }
 
 // ── INIT ─────────────────────────────────────────────────
